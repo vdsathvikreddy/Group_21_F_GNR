@@ -93,6 +93,27 @@ GNR638-A2/
 │       ├── scenario_4_5_feature_norms.png
 │       ├── scenario_4_5_pca_{model}_{depth}.png   # model ∈ {resnet50, efficientnet_b0, convnext_tiny}
 │       │                                           # depth ∈ {early, middle, final}  → 9 PCA plots
+|  ├── resnet50_linear_probe_best.pth
+|  ├── resnet50_last_block_best.pth
+|  ├── resnet50_selective_20_best.pth
+|  ├── resnet50_full_ft_best.pth
+|  ├── resnet50_fewshot_100pct_best.pth
+|  ├── resnet50_fewshot_20pct_best.pth
+|  ├── resnet50_fewshot_5pct_best.pth
+|  ├── efficientnet_b0_linear_probe_best.pth
+|  ├── efficientnet_b0_last_block_best.pth
+|  ├── efficientnet_b0_selective_20_best.pth
+|  ├── efficientnet_b0_full_ft_best.pth
+|  ├── efficientnet_b0_fewshot_100pct_best.pth
+|  ├── efficientnet_b0_fewshot_20pct_best.pth
+|  ├── efficientnet_b0_fewshot_5pct_best.pth
+|  ├── convnext_tiny_linear_probe_best.pth
+|  ├── convnext_tiny_last_block_best.pth
+|  ├── convnext_tiny_selective_20_best.pth
+|  ├── convnext_tiny_full_ft_best.pth
+|  ├── convnext_tiny_fewshot_100pct_best.pth
+|  ├── convnext_tiny_fewshot_20pct_best.pth
+|  └── convnext_tiny_fewshot_5pct_best.pth
 │
 ├── report/
 │   └── GNR638_A2_Report.pdf   # report
@@ -334,18 +355,7 @@ The `report/` directory contains:
 
 | File | Description |
 |---|---|
-| `GNR638_A2_Report.tex` | Full LaTeX source — compilable with `pdflatex` |
 | `GNR638_A2_Report.pdf` | Pre-compiled 17-page PDF |
-
-### Compiling the Report Locally
-
-```bash
-cd report/
-# Make figures accessible
-ln -s ../output figures
-pdflatex GNR638_A2_Report.tex
-pdflatex GNR638_A2_Report.tex   # run twice for TOC
-```
 
 ### Report Structure
 
