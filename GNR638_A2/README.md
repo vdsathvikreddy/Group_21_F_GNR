@@ -203,7 +203,7 @@ The notebook is structured into **numbered sections** and should be run **top to
 | 14 | **Scenario 4.2 comprehensive** (all 4 strategies × 3 models) | Cell 14 |
 | 15 | **Scenario 4.5** layer-wise feature probing | Cell 15 |
 
-> ⚠️ Cells 12–15 are **independent runs** that each reproduce all figures. Run them sequentially; re-running a cell will overwrite its output PNGs.
+> Cells 12–15 are **independent runs** that each reproduce all figures. Run them sequentially; re-running a cell will overwrite its output PNGs.
 
 ---
 
@@ -260,7 +260,7 @@ Four strategies compared per model. LR for full fine-tune reduced to `1e-4`.
 | EfficientNet-B0 | 85.56% | 95.64% | 95.43% | 96.43% |
 | ConvNeXt-Tiny | 94.21% | 96.28% | 95.85% | **96.93%** |
 
-> 📌 **Key insight:** ResNet-50 Last-Block (96.64%) *outperforms* ResNet-50 Full Fine-Tune (95.64%), showing that aggressive full unfreezing can hurt generalisation.
+> **Key insight:** ResNet-50 Last-Block (96.64%) *outperforms* ResNet-50 Full Fine-Tune (95.64%), showing that aggressive full unfreezing can hurt generalisation.
 
 ---
 
@@ -274,7 +274,7 @@ Full fine-tuning applied to 100% / 20% / 5% of training data.
 | EfficientNet-B0 | 96.71% | 91.71% | 75.20% | 0.222 |
 | ConvNeXt-Tiny | 75.41% | 38.17% | **4.29%** | **0.943** |
 
-> 📌 **Critical failure:** ConvNeXt-Tiny collapses to near-random (4.29%) at 5% data, while its *frozen* linear probe achieves 94.21%. Full fine-tuning a large-capacity model under extreme data scarcity causes catastrophic divergence.
+> **Critical failure:** ConvNeXt-Tiny collapses to near-random (4.29%) at 5% data, while its *frozen* linear probe achieves 94.21%. Full fine-tuning a large-capacity model under extreme data scarcity causes catastrophic divergence.
 
 ---
 
@@ -290,7 +290,7 @@ Evaluated on fully fine-tuned models. Clean accuracies: ResNet-50 96.14%, Effici
 | Motion Blur | **71.29%** | 60.62% | 70.44% |
 | Brightness +0.2 | 98.70% | **99.03%** | 99.23% |
 
-> 📌 **ConvNeXt-Tiny is most noise-robust** (large kernels + LayerNorm). EfficientNet-B0 is most noise-fragile (channel-independent depthwise ops). All models *improve* under brightness shift — a sign that AID images are slightly underexposed relative to ImageNet.
+> **ConvNeXt-Tiny is most noise-robust** (large kernels + LayerNorm). EfficientNet-B0 is most noise-fragile (channel-independent depthwise ops). All models *improve* under brightness shift — a sign that AID images are slightly underexposed relative to ImageNet.
 
 ---
 
@@ -304,7 +304,7 @@ Logistic regression probes on frozen intermediate features (900-image fixed subs
 | EfficientNet-B0 | blocks.1 (24-D) | 66.62% | blocks.4 (112-D) | 89.42% | blocks.6 (320-D) | **90.64%** |
 | ConvNeXt-Tiny | stages.0 (96-D) | 80.20% | stages.2 (384-D) | **95.00%** | stages.3 (768-D) | 93.42% |
 
-> 📌 **Middle layers are the most transferable.** Both ResNet-50 and ConvNeXt-Tiny show a *decrease* from middle to final layer — the final layers are over-specialised to ImageNet categories, while middle layers capture richer domain-agnostic semantics.
+> **Middle layers are the most transferable.** Both ResNet-50 and ConvNeXt-Tiny show a *decrease* from middle to final layer — the final layers are over-specialised to ImageNet categories, while middle layers capture richer domain-agnostic semantics.
 
 ---
 
