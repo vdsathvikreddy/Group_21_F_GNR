@@ -95,7 +95,6 @@ gnr638-a2/
 │       │                                           # depth ∈ {early, middle, final}  → 9 PCA plots
 │
 ├── report/
-│   ├── GNR638_A2_Report.tex   # Full LaTeX source (compilable)
 │   └── GNR638_A2_Report.pdf   # Compiled 17-page report
 │
 └── README.md                  # This file
