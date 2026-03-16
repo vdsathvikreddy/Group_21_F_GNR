@@ -401,7 +401,7 @@ os.environ['PYTHONHASHSEED']       = '42'
 ```
 
 Given identical hardware and software versions, all results should reproduce exactly. Minor floating-point non-determinism may occur across different GPU architectures due to CUDA kernel implementations.
-
+We used the help of AI tools to generate some parts of Readme and neat print statements in the .ipynb file.
 ---
 
 *GNR638 Assignment 2 — Aerial Image Transfer Learning Study*
