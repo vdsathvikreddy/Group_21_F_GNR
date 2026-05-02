@@ -1,0 +1,12 @@
+numpy==1.26.4
+opencv-python-headless
+Pillow
+ImageHash
+paddlepaddle-gpu
+paddleocr
+pandas==2.1.4
+rapidfuzz
+huggingface_hub
+transformers
+accelerate
+qwen-vl-utils
