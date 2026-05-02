@@ -1,8 +1,9 @@
 # GNR Project 1 — Map Stitching & Spatial MCQ Answering
 
 ## Team
-- Student 1 Roll: XXXXX
-- Student 2 Roll: XXXXX
+- Vijaya Raghavendra S, 23B1042
+- V D Sathvik, 23B0906
+- Ajay Pudi, 23B1010
 
 ## Pipeline Overview
 This project solves the spatial map reconstruction and evaluation task using a 3-phase hybrid architecture:
