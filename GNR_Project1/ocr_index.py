@@ -4,7 +4,7 @@ Runs PaddleOCR on the stitched map canvas.
 Builds a spatial DataFrame: text | bbox | center | confidence
 Used by answering.py for lookup and spatial routing.
 """
-
+import os
 import cv2
 import numpy as np
 import pandas as pd
