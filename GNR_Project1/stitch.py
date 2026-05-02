@@ -1,638 +1,409 @@
-"""
-Unified Map Stitcher (Dynamic Module)
-- Overlap constrained to 24–64 pixels
-- Patches must be square (enforced at load time)
-- Final image can be rectangular (rows × cols)
-"""
-
-from pathlib import Path
-from collections import defaultdict
-from itertools import combinations
+import sys
 import math
 import numpy as np
 import cv2
-from PIL import Image
 import imagehash
+from pathlib import Path
+from collections import defaultdict
+from itertools import combinations
+from PIL import Image
 
+TARGET_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+MSE_LIMIT = 300.0
 
-# CONFIGURATION
-
-PATCH_DIR      = Path("patches")
-OUTPUT_PATH    = Path("final_stitched.png")
-VALID_EXTS     = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
-THREE_PART_MSE = 300.0
-
-# Overlap search range (pixels) — in [24, 64]
-OVERLAP_MIN = 24
-OVERLAP_MAX = 64
-
-
-# UTILITIES & MATH
-
-def _factorizations(n):
-    """Return all (rows, cols) pairs where rows*cols == n, rows <= cols."""
-    pairs = []
-    for r in range(1, int(math.isqrt(n)) + 1):
-        if n % r == 0:
-            pairs.append((r, n // r))
-    return pairs
-
-
-def _estimate_grid(n):
-    """
-    Return (n_rows, n_cols) for a rectangular grid.
-    Prefers the most-square factorization but keeps rows <= cols so the
-    final image can be wider than it is tall (typical map layout).
-    """
-    pairs = _factorizations(n)
-    best = min(pairs, key=lambda rc: abs(rc[0] - rc[1]))
+def get_grid_dims(n):
+    best = (1, n)
+    for i in range(1, int(math.isqrt(n)) + 1):
+        if n % i == 0:
+            j = n // i
+            if abs(i - j) < abs(best[0] - best[1]):
+                best = (i, j)
     return best
 
+def get_files(directory):
+    return sorted([f for f in Path(directory).iterdir() if f.is_file() and f.suffix.lower() in TARGET_EXTS])
 
-def list_images(folder):
-    """Returns a sorted list of valid image paths from the folder."""
-    return sorted([p for p in folder.iterdir()
-                   if p.is_file() and p.suffix.lower() in VALID_EXTS])
+def get_mse(arr1, arr2):
+    h = min(arr1.shape[0], arr2.shape[0])
+    w = min(arr1.shape[1], arr2.shape[1])
+    if h == 0 or w == 0: return float("inf")
+    return float(np.mean((arr1[:h, :w].astype(np.float32) - arr2[:h, :w].astype(np.float32)) ** 2))
 
+def detect_cycle(start, end, graph):
+    curr, seen = start, set()
+    while curr in graph and curr not in seen:
+        if curr == end: return True
+        seen.add(curr)
+        curr = graph[curr]
+    return curr == end
 
-def enforce_square_patches(images, paths):
-    """
-    Assert every loaded patch is square.
-    Raises ValueError listing all offending files if any are not square.
-    """
-    bad = []
-    for p, im in zip(paths, images):
-        if im.width != im.height:
-            bad.append(f"  {p.name}: {im.width}x{im.height}")
-    if bad:
-        raise ValueError(
-            "All patches must be square, but the following are not:\n"
-            + "\n".join(bad)
-        )
+def check_boundary_thirds(s1, s2, limit=MSE_LIMIT):
+    h = min(s1.shape[0], s2.shape[0])
+    w = min(s1.shape[1], s2.shape[1])
+    if h == 0 or w == 0: return False
+    c1, c2 = s1[:h, :w], s2[:h, :w]
+    p1, p2 = w // 3, (2 * w) // 3
+    return all(get_mse(c1[:, l:r], c2[:, l:r]) <= limit for l, r in [(0, p1), (p1, p2), (p2, w)] if r > l)
 
-
-def arr_mse(a, b):
-    """Calculates Mean Squared Error between two numpy pixel arrays."""
-    h = min(a.shape[0], b.shape[0])
-    w = min(a.shape[1], b.shape[1])
-    if h == 0 or w == 0:
-        return float("inf")
-    return float(np.mean(
-        (a[:h, :w].astype(np.float32) - b[:h, :w].astype(np.float32)) ** 2
-    ))
-
-
-def has_path(start, target, out_map):
-    """Checks for a path in the DAG to prevent cycles."""
-    cur, seen = start, set()
-    while cur in out_map and cur not in seen:
-        if cur == target:
-            return True
-        seen.add(cur)
-        cur = out_map[cur]
-    return cur == target
-
-
-def three_part_ok(src_strip, dst_strip, max_mse=THREE_PART_MSE):
-    """Splits overlapping regions into thirds; all three must pass MSE threshold."""
-    h = min(src_strip.shape[0], dst_strip.shape[0])
-    w = min(src_strip.shape[1], dst_strip.shape[1])
-    if h == 0 or w == 0:
-        return False
-    s, d = src_strip[:h, :w], dst_strip[:h, :w]
-    a, b = w // 3, (2 * w) // 3
-    return all(
-        arr_mse(s[:, l:r], d[:, l:r]) <= max_mse
-        for l, r in [(0, a), (a, b), (b, w)]
-        if r > l
-    )
-
-
- 
-# PREPROCESSING: STRIPS & HASHES
- 
-def build_strip_cache(images, axis):
-    """Caches 1/4 width/height boundary strips as raw pixel arrays."""
-    cache = {}
-    for idx, im in enumerate(images):
-        arr = np.array(im.convert("L"), dtype=np.float32)
-        h, w = arr.shape
+def extract_edges(imgs, axis, size):
+    res = {}
+    for i, im in enumerate(imgs):
+        mat = np.array(im.convert("L"), dtype=np.float32)
+        h, w = mat.shape
         if axis == "h":
-            q = max(1, w // 4)
-            cache[idx] = {"left": arr[:, :q], "right": arr[:, -q:]}
+            val = min(size, w)
+            res[i] = {"L": mat[:, :val], "R": mat[:, -val:]}
         else:
-            q = max(1, h // 4)
-            cache[idx] = {"top": arr[:q, :], "bottom": arr[-q:, :]}
-    return cache
+            val = min(size, h)
+            res[i] = {"T": mat[:val, :], "B": mat[-val:, :]}
+    return res
 
-
-def build_hash_records(images, axis):
-    """Computes perceptual hashes for boundary strips to quickly group matches."""
-    records = []
-    for idx, im in enumerate(images):
-        gray = im.convert("L")
-        w, h = gray.size
+def compute_phash_data(imgs, axis, size):
+    out = []
+    for i, im in enumerate(imgs):
+        g = im.convert("L")
+        w, h = g.size
         if axis == "h":
-            q = max(1, w // 4)
-            strips = [(0, gray.crop((0, 0, q, h))),
-                      (1, gray.crop((w - q, 0, w, h)))]
+            val = min(size, w)
+            sections = [(0, g.crop((0, 0, val, h))), (1, g.crop((w - val, 0, w, h)))]
         else:
-            q = max(1, h // 4)
-            strips = [(0, gray.crop((0, 0, w, q))),
-                      (1, gray.crop((0, h - q, w, h)))]
-        for label, strip in strips:
-            records.append({
-                "strip_idx":  len(records),
-                "image_idx":  idx,
-                "label":      label,
-                "hash":       str(imagehash.phash(strip)),
-            })
-    return records
+            val = min(size, h)
+            sections = [(0, g.crop((0, 0, w, val))), (1, g.crop((0, h - val, w, h)))]
+        for code, section in sections:
+            out.append({"s_idx": len(out), "img_id": i, "side": code, "phash": str(imagehash.phash(section))})
+    return out
 
+def find_best_overlap(imgs, axis, required_edges, start=24, end=64):
+    results = []
+    selected = None
+    for sz in range(start, end + 1):
+        h_data = compute_phash_data(imgs, axis, sz)
+        e_cache = extract_edges(imgs, axis, sz)
+        c_edges = evaluate_pairs(h_data, e_cache, axis)
+        count = len(c_edges)
+        results.append((sz, count))
+        if selected is None and count >= required_edges:
+            selected = sz
+    
+    if selected is None:
+        selected = max(results, key=lambda x: (x[1], -x[0]))[0]
+        msg = "fallback to max candidates"
+    else:
+        msg = "met target threshold"
 
- 
-# GRAPH BUILDING & SOLVING
- 
-def compute_flag_info(records):
-    """Flags unambiguous edges (no competing matches) for strict DAG inclusion."""
-    hmap = defaultdict(list)
-    for r in records:
-        hmap[r["hash"]].append(r)
-    left_nb  = defaultdict(set)
-    right_nb = defaultdict(set)
-    for recs in hmap.values():
-        for i, j in combinations(recs, 2):
-            ia, ib = i["image_idx"], j["image_idx"]
-            if ia == ib:
-                continue
-            la, lb = i["label"], j["label"]
-            if la == 0: left_nb[ia].add(ib)
-            if la == 1: right_nb[ia].add(ib)
-            if lb == 0: left_nb[ib].add(ia)
-            if lb == 1: right_nb[ib].add(ia)
-    info = {}
-    for idx in {r["image_idx"] for r in records}:
-        ln, rn = len(left_nb[idx]), len(right_nb[idx])
-        info[idx] = {"left_nb": ln, "right_nb": rn, "flag": (ln <= 1 and rn <= 1)}
-    return info
+    print(f"  Sweep {axis} ({start}-{end}):")
+    print("    " + ", ".join(f"{s}:{c}" for s, c in results))
+    print(f"  Selected overlap={selected} (target={required_edges}, {msg})")
+    return selected
 
+def generate_flags(h_data):
+    group = defaultdict(list)
+    for item in h_data: group[item["phash"]].append(item)
+    l_adj, r_adj = defaultdict(set), defaultdict(set)
+    for items in group.values():
+        for a, b in combinations(items, 2):
+            id1, id2 = a["img_id"], b["img_id"]
+            if id1 == id2: continue
+            s1, s2 = a["side"], b["side"]
+            if s1 == 0: l_adj[id1].add(id2)
+            if s1 == 1: r_adj[id1].add(id2)
+            if s2 == 0: l_adj[id2].add(id1)
+            if s2 == 1: r_adj[id2].add(id1)
+    res = {}
+    for x in {r["img_id"] for r in h_data}:
+        res[x] = {"l_cnt": len(l_adj[x]), "r_cnt": len(r_adj[x]), "valid": (len(l_adj[x]) <= 1 and len(r_adj[x]) <= 1)}
+    return res
 
-def build_candidate_edges(records, cache, axis):
-    """Finds matching perceptual hashes and ranks them via MSE."""
-    hmap = defaultdict(list)
-    for r in records:
-        hmap[r["hash"]].append(r["strip_idx"])
-    matched = set()
-    for idxs in hmap.values():
-        for i, j in combinations(idxs, 2):
-            ra, rb = records[i], records[j]
-            if ra["image_idx"] != rb["image_idx"]:
-                matched.add((i, j) if i < j else (j, i))
-    best = defaultdict(lambda: float("inf"))
-    for i, j in matched:
-        ra, rb = records[i], records[j]
-        ia, ib = ra["image_idx"], rb["image_idx"]
-        la, lb = ra["label"],     rb["label"]
+def refresh_flags(h_data, active_nodes):
+    filtered = [x for x in h_data if x["img_id"] in active_nodes]
+    group = defaultdict(list)
+    for item in filtered: group[item["phash"]].append(item)
+    l_adj, r_adj = defaultdict(set), defaultdict(set)
+    for items in group.values():
+        for a, b in combinations(items, 2):
+            id1, id2 = a["img_id"], b["img_id"]
+            if id1 == id2: continue
+            s1, s2 = a["side"], b["side"]
+            if s1 == 0: l_adj[id1].add(id2)
+            if s1 == 1: r_adj[id1].add(id2)
+            if s2 == 0: l_adj[id2].add(id1)
+            if s2 == 1: r_adj[id2].add(id1)
+    res = {}
+    for x in active_nodes:
+        res[x] = {"l_cnt": len(l_adj[x]), "r_cnt": len(r_adj[x]), "valid": (len(l_adj[x]) <= 1 and len(r_adj[x]) <= 1)}
+    return res
+
+def evaluate_pairs(h_data, e_cache, axis, tolerance=8):
+    count = len(h_data)
+    pairs = set()
+    hash_vals = [imagehash.hex_to_hash(r["phash"]) for r in h_data]
+
+    for i in range(count):
+        for j in range(i + 1, count):
+            if h_data[i]["img_id"] == h_data[j]["img_id"]: continue
+            if hash_vals[i] - hash_vals[j] <= tolerance:
+                pairs.add((i, j))
+
+    optimal = defaultdict(lambda: float("inf"))
+    for i, j in pairs:
+        r1, r2 = h_data[i], h_data[j]
+        i1, i2 = r1["img_id"], r2["img_id"]
+        s1, s2 = r1["side"], r2["side"]
         if axis == "h":
-            if   la == 1 and lb == 0: src, dst = ia, ib
-            elif la == 0 and lb == 1: src, dst = ib, ia
+            if s1 == 1 and s2 == 0: src, dst = i1, i2
+            elif s1 == 0 and s2 == 1: src, dst = i2, i1
             else: continue
-            score = arr_mse(cache[src]["right"], cache[dst]["left"])
+            err = get_mse(e_cache[src]["R"], e_cache[dst]["L"])
         else:
-            if   la == 1 and lb == 0: src, dst = ia, ib
-            elif la == 0 and lb == 1: src, dst = ib, ia
+            if s1 == 1 and s2 == 0: src, dst = i1, i2
+            elif s1 == 0 and s2 == 1: src, dst = i2, i1
             else: continue
-            score = arr_mse(cache[src]["bottom"], cache[dst]["top"])
-        key = (src, dst)
-        if score < best[key]:
-            best[key] = score
-    edges = [{"src": s, "dst": d, "mse": v} for (s, d), v in best.items()]
-    edges.sort(key=lambda e: e["mse"])
-    return edges
+            err = get_mse(e_cache[src]["B"], e_cache[dst]["T"])
+        
+        pair_k = (src, dst)
+        if err < optimal[pair_k]: optimal[pair_k] = err
 
+    final_edges = [{"src": s, "dst": d, "err": v} for (s, d), v in optimal.items()]
+    final_edges.sort(key=lambda x: x["err"])
+    return final_edges
 
-def build_dag(nodes, edges, flag_info):
-    """Constructs the trusted graph skeleton using strictly unambiguous edges."""
-    out_map, in_map = {}, {}
-    for e in edges:
-        src, dst = e["src"], e["dst"]
-        if not (flag_info.get(src, {}).get("flag") and
-                flag_info.get(dst, {}).get("flag")):
-            continue
-        if src in out_map or dst in in_map:
-            continue
-        if src == dst or has_path(dst, src, out_map):
-            continue
-        out_map[src] = dst
-        in_map[dst]  = src
-    return out_map, in_map
+def build_structure(nodes, edges, flags):
+    fwd, bwd = {}, {}
+    for edge in edges:
+        s, d = edge["src"], edge["dst"]
+        if not (flags.get(s, {}).get("valid") and flags.get(d, {}).get("valid")): continue
+        if s in fwd or d in bwd: continue
+        if s == d or detect_cycle(d, s, fwd): continue
+        fwd[s] = d
+        bwd[d] = s
+    return fwd, bwd
 
-
-def extract_partial_chains(nodes, out_map, in_map):
-    """Extracts solid segments from the DAG to be joined later."""
-    chains, visited = [], set()
-    for s in sorted(n for n in nodes if n not in in_map):
-        chain = [s]; visited.add(s); cur = s
-        while cur in out_map:
-            nxt = out_map[cur]
-            if nxt in visited:
-                break
-            chain.append(nxt); visited.add(nxt); cur = nxt
-        chains.append(chain)
+def get_blocks(nodes, fwd, bwd):
+    blocks, visited = [], set()
+    for start in sorted(n for n in nodes if n not in bwd):
+        blk = [start]
+        visited.add(start)
+        curr = start
+        while curr in fwd:
+            nxt = fwd[curr]
+            if nxt in visited: break
+            blk.append(nxt)
+            visited.add(nxt)
+            curr = nxt
+        blocks.append(blk)
     for n in sorted(nodes):
-        if n not in visited:
-            chains.append([n])
-    return chains
+        if n not in visited: blocks.append([n])
+    return blocks
 
+def connect_blocks(blocks, all_edges, e_cache, flags, expected_size):
+    lookup = {n: i for i, blk in enumerate(blocks) for n in blk}
+    options = defaultdict(list)
+    used_links = set()
 
-def join_partial_chains(partial_chains, all_edges, h_cache, flag_info, target):
-    """Exhaustive DFS to bridge gaps between partial chains until length = target."""
-    node_to_chain = {}
-    for ci, chain in enumerate(partial_chains):
-        for n in chain:
-            node_to_chain[n] = ci
+    for blk in blocks:
+        for i in range(len(blk) - 1):
+            used_links.add((blk[i], blk[i + 1]))
 
-    join_edges = defaultdict(list)
-    dag_used   = set()
+    for edge in all_edges:
+        s, d = edge["src"], edge["dst"]
+        if (s, d) in used_links: continue
+        idx_s, idx_d = lookup.get(s), lookup.get(d)
+        if idx_s is None or idx_d is None or idx_s == idx_d: continue
+        if blocks[idx_s][-1] != s or blocks[idx_d][0] != d: continue
+        options[s].append((d, edge["err"]))
 
-    for ci, chain in enumerate(partial_chains):
-        for k in range(len(chain) - 1):
-            dag_used.add((chain[k], chain[k + 1]))
+    for k in options: options[k].sort(key=lambda x: x[1])
 
-    for e in all_edges:
-        src, dst = e["src"], e["dst"]
-        if (src, dst) in dag_used:
-            continue
-        ci_src = node_to_chain.get(src)
-        ci_dst = node_to_chain.get(dst)
-        if ci_src is None or ci_dst is None:
-            continue
-        if ci_src == ci_dst:
-            continue
-        chain_src = partial_chains[ci_src]
-        chain_dst = partial_chains[ci_dst]
-        if chain_src[-1] != src:
-            continue
-        if chain_dst[0]  != dst:
-            continue
-        join_edges[src].append((dst, e["mse"]))
+    def test_boundary(b1, b2):
+        return check_boundary_thirds(e_cache[b1[-1]]["R"], e_cache[b2[0]]["L"])
 
-    for src in join_edges:
-        join_edges[src].sort(key=lambda x: x[1])
-
-    def boundary_ok(left_chain, right_chain):
-        return three_part_ok(h_cache[left_chain[-1]]["right"],
-                             h_cache[right_chain[0]]["left"])
-
-    def structural_ok(full_chain):
-        n = len(full_chain)
-        if n < 3:
-            return True
-        a, b = n // 3, (2 * n) // 3
-        for src, dst in [(full_chain[a - 1], full_chain[a]),
-                         (full_chain[b - 1], full_chain[b])]:
-            if not three_part_ok(h_cache[src]["right"], h_cache[dst]["left"]):
-                return False
+    def test_full(arr):
+        n = len(arr)
+        if n < 3: return True
+        p1, p2 = n // 3, (2 * n) // 3
+        for src, dst in [(arr[p1 - 1], arr[p1]), (arr[p2 - 1], arr[p2])]:
+            if not check_boundary_thirds(e_cache[src]["R"], e_cache[dst]["L"]): return False
         return True
 
-    def dfs(current_nodes, used_chains):
-        if len(current_nodes) == target:
-            return current_nodes if structural_ok(current_nodes) else None
-        if len(current_nodes) > target:
-            return None
-        tail = current_nodes[-1]
-        for head, _ in join_edges.get(tail, []):
-            ci_next = node_to_chain[head]
-            if ci_next in used_chains:
-                continue
-            next_chain = partial_chains[ci_next]
-            if len(current_nodes) + len(next_chain) > target:
-                continue
-            if not boundary_ok(current_nodes, next_chain):
-                continue
-            result = dfs(current_nodes + next_chain, used_chains | {ci_next})
-            if result is not None:
-                return result
+    def explore(path, used_idx):
+        if len(path) == expected_size:
+            return path if test_full(path) else None
+        if len(path) > expected_size: return None
+        
+        for head, _ in options.get(path[-1], []):
+            n_idx = lookup[head]
+            if n_idx in used_idx: continue
+            cand = blocks[n_idx]
+            if len(path) + len(cand) > expected_size: continue
+            if not test_boundary(path, cand): continue
+            res = explore(path + cand, used_idx | {n_idx})
+            if res: return res
         return None
 
-    for ci, chain in enumerate(partial_chains):
-        result = dfs(list(chain), {ci})
-        if result is not None:
-            return result
+    for i, blk in enumerate(blocks):
+        res = explore(list(blk), {i})
+        if res: return res
 
-    raise RuntimeError(f"Could not join chains into target length {target}.")
+    raise RuntimeError(f"Failed to assemble blocks into length {expected_size}.")
 
+def assemble_grid(nodes, h_data, h_edges, e_cache, expected_size):
+    pool = set(nodes)
+    grid = []
 
-def build_all_rows(all_nodes, h_edges, h_cache, h_flag_info, target):
-    """Processes horizontal links to build perfect rows of length `target`."""
-    remaining = set(all_nodes)
-    rows = []
-    while remaining:
-        nodes = sorted(remaining)
-        relevant_edges = [e for e in h_edges
-                          if e["src"] in remaining and e["dst"] in remaining]
-        out_map, in_map = build_dag(nodes, relevant_edges, h_flag_info)
-        partial_chains  = extract_partial_chains(nodes, out_map, in_map)
+    while len(pool) >= expected_size:
+        active = sorted(pool)
+        valid_edges = [e for e in h_edges if e["src"] in pool and e["dst"] in pool]
 
-        print(f"  remaining={len(remaining):<3} partial_chains={len(partial_chains):<2} "
-              f"sizes={sorted(len(c) for c in partial_chains)}")
+        dyn_flags = refresh_flags(h_data, pool)
+        fwd, bwd = build_structure(active, valid_edges, dyn_flags)
+        blocks = get_blocks(active, fwd, bwd)
 
-        row = join_partial_chains(partial_chains, relevant_edges,
-                                  h_cache, h_flag_info, target=target)
-        rows.append(row)
-        for idx in row:
-            remaining.remove(idx)
-    return rows
+        print(f"  Pool={len(pool):<3} Blocks={len(blocks):<2} Sizes={[len(b) for b in blocks]}")
 
-
-def order_rows_vertically_from_patches(h_rows, images):
-    """
-    Orders rows vertically using ORIGINAL patch images, not stitched rows.
-    Uses all patches in each row and votes on vertical adjacency.
-    """
-    n_rows = len(h_rows)
-
-    patch_top_hash    = {}
-    patch_bottom_hash = {}
-    for row_idx, row_patches in enumerate(h_rows):
-        for patch_idx in row_patches:
-            img  = images[patch_idx].convert("L")
-            w, h = img.size
-            q    = max(1, h // 4)
-            patch_top_hash[patch_idx]    = str(imagehash.phash(img.crop((0, 0, w, q))))
-            patch_bottom_hash[patch_idx] = str(imagehash.phash(img.crop((0, h - q, w, h))))
-
-    votes = defaultdict(lambda: defaultdict(int))
-    for row_a, row_patches_a in enumerate(h_rows):
-        for patch_a in row_patches_a:
-            h_bottom = patch_bottom_hash[patch_a]
-            for row_b, row_patches_b in enumerate(h_rows):
-                if row_a == row_b:
-                    continue
-                for patch_b in row_patches_b:
-                    if patch_top_hash[patch_b] == h_bottom:
-                        votes[row_a][row_b] += 1
-
-    all_edges = sorted(
-        [(cnt, ra, rb)
-         for ra, nbrs in votes.items()
-         for rb, cnt in nbrs.items()],
-        reverse=True,
-    )
-    below_map = {}
-    above_map = {}
-
-    for cnt, row_a, row_b in all_edges:
-        if row_a in below_map or row_b in above_map:
+        ready = [b for b in blocks if len(b) == expected_size]
+        if ready:
+            r = ready[0]
+            grid.append(r)
+            for x in r: pool.discard(x)
             continue
-        if has_path(row_b, row_a, below_map):
-            continue
-        below_map[row_a] = row_b
-        above_map[row_b] = row_a
 
-    tops = [r for r in range(n_rows) if r not in above_map]
-    for start in tops:
-        chain = [start]; visited = {start}
-        while chain[-1] in below_map:
-            nxt = below_map[chain[-1]]
-            if nxt in visited:
-                break
-            chain.append(nxt); visited.add(nxt)
-        if len(chain) == n_rows:
-            print(f"  Vertical order found via patch voting: {chain}")
-            return chain
+        try:
+            r = connect_blocks(blocks, valid_edges, e_cache, dyn_flags, expected_size)
+            grid.append(r)
+            for x in r: pool.discard(x)
+        except RuntimeError as e:
+            print(f"  ERR: {e}")
+            biggest = max(blocks, key=len)
+            print(f"  Using best match of size {len(biggest)}")
+            grid.append(biggest)
+            for x in biggest: pool.discard(x)
 
-    print("  WARNING: Hash voting incomplete, falling back to MSE on first patches...")
-    return _vertical_order_mse_fallback(h_rows, images, n_rows)
+    return grid
 
+def sort_vertical(row_imgs, v_data, e_cache, flags, v_edges):
+    total = len(row_imgs)
+    v_nodes = list(range(total))
+    fwd, bwd = build_structure(v_nodes, v_edges, flags)
+    blocks = get_blocks(v_nodes, fwd, bwd)
+    print(f"  V-blocks: {len(blocks)} Sizes={[len(b) for b in blocks]}")
+    if len(blocks) == 1 and len(blocks[0]) == total:
+        return blocks[0]
+    return connect_blocks(blocks, v_edges, e_cache, flags, total)
 
-def _vertical_order_mse_fallback(h_rows, images, n_rows):
-    """Fallback: order rows by MSE between bottom of row A and top of row B."""
-    row_top    = {}
-    row_bottom = {}
-    for row_idx, row_patches in enumerate(h_rows):
-        arr = np.array(images[row_patches[0]].convert("L"), dtype=np.float32)
-        h, w = arr.shape
-        q = max(1, h // 4)
-        row_top[row_idx]    = arr[:q, :]
-        row_bottom[row_idx] = arr[-q:, :]
+def validate_vertical(seq, e_cache, v_data):
+    h_map = {}
+    for r in v_data:
+        i = r["img_id"]
+        if i not in h_map: h_map[i] = {}
+        h_map[i]["T" if r["side"] == 0 else "B"] = r["phash"]
 
-    mse_edges = sorted(
-        [(arr_mse(row_bottom[a], row_top[b]), a, b)
-         for a in range(n_rows)
-         for b in range(n_rows) if a != b]
-    )
-    below_map = {}
-    above_map = {}
-    for mse, a, b in mse_edges:
-        if a in below_map or b in above_map:
-            continue
-        if has_path(b, a, below_map):
-            continue
-        below_map[a] = b
-        above_map[b] = a
-
-    tops  = [r for r in range(n_rows) if r not in above_map]
-    chain = [tops[0]]
-    while chain[-1] in below_map:
-        chain.append(below_map[chain[-1]])
-    print(f"  MSE fallback vertical order: {chain}")
-    return chain
-
-
- 
-# OVERLAP DETECTION  (constrained 24–64 px)
- 
-def detect_overlap(img_a: Image.Image, img_b: Image.Image, axis: str) -> int:
-    """
-    Find exact overlap between two adjacent patches by exhaustive MSE search,
-    restricted to the range [OVERLAP_MIN, OVERLAP_MAX] pixels.
-
-    axis='h': img_b is to the RIGHT of img_a  -> compare right edge of A vs left edge of B
-    axis='v': img_b is BELOW img_a            -> compare bottom edge of A vs top edge of B
-
-    Returns: overlap in pixels (always in [OVERLAP_MIN, OVERLAP_MAX])
-    """
-    arr_a = np.array(img_a.convert("L"), dtype=np.float32)
-    arr_b = np.array(img_b.convert("L"), dtype=np.float32)
-
-    if axis == "h":
-        max_possible = min(arr_a.shape[1], arr_b.shape[1]) - 1
+    errs = []
+    for i in range(len(seq) - 1):
+        a, b = seq[i], seq[i + 1]
+        ha, hb = h_map.get(a, {}).get("B"), h_map.get(b, {}).get("T")
+        h_ok = (ha is not None and ha == hb)
+        p_ok = check_boundary_thirds(e_cache[a]["B"], e_cache[b]["T"])
+        if not h_ok or not p_ok:
+            errs.append(f"  {i}->{i+1}: hash_ok={h_ok} px_ok={p_ok}")
+    if errs:
+        print(f"  WARN: V-alignment issues:\n" + "\n".join(errs))
     else:
-        max_possible = min(arr_a.shape[0], arr_b.shape[0]) - 1
+        print(f"  All {len(seq)-1} V-links verified.")
 
-    lo = OVERLAP_MIN
-    hi = min(OVERLAP_MAX, max_possible)
+def combine_h(imgs, overlap):
+    min_ht = min(i.height for i in imgs)
+    std = [i.convert("RGB").crop((0, 0, i.width, min_ht)) if i.height != min_ht else i.convert("RGB") for i in imgs]
 
-    if lo > hi:
-        # Patch too small to honour the range; use whatever fits
-        hi = max(1, max_possible)
-        lo = min(lo, hi)
+    chunks = []
+    for i, im in enumerate(std):
+        if i == 0:
+            chunks.append(im)
+        else:
+            o = min(overlap, im.width - 1)
+            chunks.append(im.crop((o, 0, im.width, im.height)))
 
-    best_ov, best_mse = lo, float("inf")
+    out = Image.new("RGB", (sum(p.width for p in chunks), min_ht))
+    offset = 0
+    for p in chunks:
+        out.paste(p, (offset, 0))
+        offset += p.width
+    return out
 
-    if axis == "h":
-        for ov in range(lo, hi + 1):
-            mse = arr_mse(arr_a[:, -ov:], arr_b[:, :ov])
-            if mse < best_mse:
-                best_mse = mse
-                best_ov  = ov
-    else:
-        for ov in range(lo, hi + 1):
-            mse = arr_mse(arr_a[-ov:, :], arr_b[:ov, :])
-            if mse < best_mse:
-                best_mse = mse
-                best_ov  = ov
+def combine_v(imgs, overlap):
+    min_wd = min(i.width for i in imgs)
+    std = [i.convert("RGB").crop((0, 0, min_wd, i.height)) if i.width != min_wd else i.convert("RGB") for i in imgs]
 
-    return best_ov
+    chunks = []
+    for i, im in enumerate(std):
+        if i == 0:
+            chunks.append(im)
+        else:
+            o = min(overlap, im.height - 1)
+            chunks.append(im.crop((0, o, im.width, im.height)))
 
+    out = Image.new("RGB", (min_wd, sum(p.height for p in chunks)))
+    offset = 0
+    for p in chunks:
+        out.paste(p, (0, offset))
+        offset += p.height
+    return out
 
- 
-# FINAL STITCH RENDERING
- 
-def stitch_h(images: list[Image.Image]) -> Image.Image:
-    """Horizontally stitch patches with per-pair overlap detection (24-64 px)."""
-    min_h = min(im.height for im in images)
-    normalized = []
-    for im in images:
-        rgb = im.convert("RGB")
-        if rgb.height != min_h:
-            rgb = rgb.crop((0, 0, rgb.width, min_h))
-        normalized.append(rgb)
+def stitch_patches(src_folder, save_path=None):
+    files = get_files(src_folder)
+    count = len(files)
+    if count == 0: raise FileNotFoundError("Directory is empty or lacks images.")
 
-    stitched_so_far = normalized[0]
-    parts = [stitched_so_far]
+    rows, cols = get_grid_dims(count)
+    req_h_edges = rows * cols * (cols - 1) // rows
+    print(f"Found {count} files. Matrix={rows}x{cols} TargetH={req_h_edges}")
 
-    for i in range(1, len(normalized)):
-        patch = normalized[i]
+    img_list = [Image.open(f) for f in files]
+    all_ids = list(range(count))
 
-        ov = detect_overlap(stitched_so_far, patch, axis="h")
-        ov = min(ov, patch.width - 1)
-        cropped = patch.crop((ov, 0, patch.width, patch.height))
-        parts.append(cropped)
+    print("\n--- H-Pass ---")
+    h_ov = find_best_overlap(img_list, "h", req_h_edges, 24, 64)
+    h_data = compute_phash_data(img_list, "h", h_ov)
+    h_cache = extract_edges(img_list, "h", h_ov)
+    h_flags = generate_flags(h_data)
+    h_edges = evaluate_pairs(h_data, h_cache, "h")
 
-        # Rebuild stitched_so_far so each subsequent patch is compared against
-        # the correct right edge (important when patches differ in width).
-        canvas_w = sum(p.width for p in parts)
-        tmp = Image.new("RGB", (canvas_w, min_h))
-        x = 0
-        for p in parts:
-            tmp.paste(p, (x, 0))
-            x += p.width
-        stitched_so_far = tmp
+    safe = sum(1 for v in h_flags.values() if v["valid"])
+    print(f"  Edges={len(h_edges)} Safe={safe} Ambiguous={count - safe}\n")
 
-    return stitched_so_far
+    grid = assemble_grid(all_ids, h_data, h_edges, h_cache, cols)
 
+    if any(len(r) != cols for r in grid):
+        raise RuntimeError("Grid dimension failure.")
 
-def stitch_v(images: list[Image.Image]) -> Image.Image:
-    """Vertically stitch full rows with per-pair overlap detection (24-64 px)."""
-    min_w = min(im.width for im in images)
-    normalized = []
-    for im in images:
-        rgb = im.convert("RGB")
-        if rgb.width != min_w:
-            rgb = rgb.crop((0, 0, min_w, rgb.height))
-        normalized.append(rgb)
+    print(f"\n  {len(grid)} rows validated.")
+    merged_rows = [combine_h([img_list[i] for i in r], h_ov) for r in grid]
 
-    stitched_so_far = normalized[0]
-    parts = [stitched_so_far]
+    print("\n--- V-Pass ---")
+    req_v_edges = len(merged_rows) * (len(merged_rows) - 1)
+    v_ov = find_best_overlap(merged_rows, "v", req_v_edges, 24, 64)
+    v_data = compute_phash_data(merged_rows, "v", v_ov)
+    v_cache = extract_edges(merged_rows, "v", v_ov)
+    v_flags = generate_flags(v_data)
+    v_edges = evaluate_pairs(v_data, v_cache, "v")
 
-    for i in range(1, len(normalized)):
-        row_img = normalized[i]
+    print(f"  Edges={len(v_edges)} (Target={req_v_edges})")
 
-        ov = detect_overlap(stitched_so_far, row_img, axis="v")
-        ov = min(ov, row_img.height - 1)
-        cropped = row_img.crop((0, ov, row_img.width, row_img.height))
-        parts.append(cropped)
+    v_order = sort_vertical(merged_rows, v_data, v_cache, v_flags, v_edges)
+    print(f"  Order: {v_order}")
 
-        canvas_h = sum(p.height for p in parts)
-        tmp = Image.new("RGB", (min_w, canvas_h))
-        y = 0
-        for p in parts:
-            tmp.paste(p, (0, y))
-            y += p.height
-        stitched_so_far = tmp
+    validate_vertical(v_order, v_cache, v_data)
 
-    return stitched_so_far
+    print("\n--- Export ---")
+    final_img = combine_v([merged_rows[i] for i in v_order], v_ov)
 
+    if save_path:
+        final_img.save(save_path)
+        print(f"Saved: {save_path} Size={final_img.size}")
 
- 
-# MODULAR ENTRY POINT
- 
-def stitch_patches(patches_dir, output_path=None):
-    """
-    Called by inference.py.
-    patches_dir : path to folder containing patch_*.png  (must be square patches)
-    output_path : optional path to save stitched PNG
-    Returns     : numpy BGR array (OpenCV format)
-    """
-    folder      = Path(patches_dir)
-    image_paths = list_images(folder)
-    N           = len(image_paths)
+    return cv2.cvtColor(np.array(final_img.convert("RGB")), cv2.COLOR_RGB2BGR)
 
-    if N == 0:
-        raise FileNotFoundError(f"No images found in {folder.resolve()}")
-
-    images = [Image.open(p) for p in image_paths]
-
-    # Enforce square patches
-    enforce_square_patches(images, image_paths)
-
-    # Determine rectangular grid layout
-    n_rows, n_cols = _estimate_grid(N)
-    print(f"Images={N}  GRID={n_rows}x{n_cols}  "
-          f"(overlap range: {OVERLAP_MIN}-{OVERLAP_MAX} px)")
-
-    all_nodes = list(range(N))
-
-    # Horizontal pass
-    print("\n-- Horizontal pass --")
-    h_records   = build_hash_records(images, "h")
-    h_cache     = build_strip_cache(images,  "h")
-    h_flag_info = compute_flag_info(h_records)
-    h_edges     = build_candidate_edges(h_records, h_cache, "h")
-
-    n_flag  = sum(1 for v in h_flag_info.values() if     v["flag"])
-    n_ambig = sum(1 for v in h_flag_info.values() if not v["flag"])
-    print(f"  candidate edges={len(h_edges)}")
-    print(f"  unambiguous={n_flag}  ambiguous={n_ambig}\n")
-
-    h_rows = build_all_rows(all_nodes, h_edges, h_cache, h_flag_info, target=n_cols)
-
-    bad = [r for r in h_rows if len(r) != n_cols]
-    if bad:
-        raise RuntimeError(f"{len(bad)} row(s) with wrong length != {n_cols}")
-
-    if len(h_rows) != n_rows:
-        raise RuntimeError(
-            f"Expected {n_rows} rows but got {len(h_rows)}. "
-            f"Check that N={N} patches match the {n_rows}x{n_cols} grid."
-        )
-
-    print(f"\n  {len(h_rows)} rows of length {n_cols} OK")
-    row_images = [stitch_h([images[idx] for idx in row]) for row in h_rows]
-
-    # Vertical pass
-    print("\n-- Vertical pass --")
-    flat_v = order_rows_vertically_from_patches(h_rows, images)
-    print(f"  vertical order: {flat_v}")
-
-    # Final render
-    print("\n-- Final stitch --")
-    final_pil = stitch_v([row_images[idx] for idx in flat_v])
-
-    if output_path:
-        final_pil.save(output_path)
-        print(f"Saved -> {output_path}  size={final_pil.size}")
-
-    return cv2.cvtColor(np.array(final_pil.convert("RGB")), cv2.COLOR_RGB2BGR)
-
-
- 
-# CLI EXECUTION
- 
 if __name__ == "__main__":
-    import sys
-    patch_folder = Path(sys.argv[1]) if len(sys.argv) > 1 else PATCH_DIR
-    canvas = stitch_patches(patch_folder, OUTPUT_PATH)
-    print(f"Done. Canvas shape: {canvas.shape}")
+    target_dir = sys.argv[1] if len(sys.argv) > 1 else "patches_out"
+    out_file = "final_stitched.png"
+    matrix_bgr = stitch_patches(target_dir, out_file)
+    print(f"Finished. BGR shape: {matrix_bgr.shape}")
