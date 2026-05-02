@@ -1,6 +1,5 @@
 #!/bin/bash
 # setup.bash
-# Run once before inference. Internet IS available here.
 
 set -e  # exit on any error
 
@@ -8,24 +7,16 @@ echo "============================================"
 echo "  GNR Project 1 — Environment Setup"
 echo "============================================"
 
-# ── EDIT THIS ────────────────────────────────────────────
-REPO_URL="https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git"
-# ─────────────────────────────────────────────────────────
+REPO_URL="https://github.com/vdsathvikreddy/Group_21_F_GNR/tree/main/GNR_Project1"
 
-REPO_DIR="gnr_project1"
-
-# 1. Clone repository
 echo ""
-echo "[1/4] Cloning repository..."
-if [ ! -d "$REPO_DIR" ]; then
-    git clone "$REPO_URL" "$REPO_DIR"
-else
-    echo "  Directory already exists. Pulling latest..."
-    cd "$REPO_DIR" && git pull && cd ..
-fi
+echo "[1/4] Fetching repository files into current directory..."
 
-# IMPORTANT: Move into the cloned directory so pip finds requirements.txt
-cd "$REPO_DIR"
+git clone "$REPO_URL" .tmp_repo
+
+cp -r .tmp_repo/* ./
+
+rm -rf .tmp_repo
 
 # 2. Create conda environment
 echo ""
