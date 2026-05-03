@@ -8,7 +8,7 @@ import os
 import cv2
 import numpy as np
 import pandas as pd
-
+import logging
 
 def build_ocr_index(canvas_bgr, verbose=True):
     """
@@ -24,19 +24,17 @@ def build_ocr_index(canvas_bgr, verbose=True):
     if verbose:
         print("Running PaddleOCR...")
 
-    canvas_rgb = cv2.cvtColor(canvas_bgr, cv2.COLOR_BGR2RGB)
-    # Resolve model dir relative to this file's location
-    _base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights", "paddleocr")
+    # Suppress PaddleOCR's verbose logging
+    logging.getLogger('ppocr').setLevel(logging.ERROR)
 
+    canvas_rgb = cv2.cvtColor(canvas_bgr, cv2.COLOR_BGR2RGB)
+    
     ocr = PaddleOCR(
         use_angle_cls=True,
         lang="en",
-        use_gpu=True,
-        det_model_dir=os.path.join(_base, "det"),
-        rec_model_dir=os.path.join(_base, "rec"),
-        cls_model_dir=os.path.join(_base, "cls"),
-        show_log=False
+        use_gpu=False
     )
+    
     results = ocr.ocr(canvas_rgb, cls=True)
 
     rows = []

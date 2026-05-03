@@ -12,7 +12,7 @@ Writes:
     ./submission.csv  (current working directory, NOT inside test_dir)
 """
 import os
-os.environ["TRANSFORMERS_OFFLINE"] = "1"   # hard blocks any HF network call
+os.environ["TRANSFORMERS_OFFLINE"] = "1" 
 os.environ["HF_DATASETS_OFFLINE"]  = "1"
 os.environ["HF_HUB_OFFLINE"]       = "1"
 import argparse, os, time
@@ -58,7 +58,13 @@ def main():
     # Phase 1: Stitch
     print("\n[Phase 1] Stitching patches...")
     t0 = time.time()
-    canvas = stitch_patches(patches_dir, output_path="./stitched_map.png")
+    
+    # Call the function without the output_path argument
+    canvas = stitch_patches(patches_dir)
+    
+    # Save the resulting canvas to the current directory using OpenCV
+    cv2.imwrite("./stitched_map.png", canvas)
+    
     print(f"Stitching done in {time.time()-t0:.1f}s  canvas={canvas.shape}")
 
     # Phase 2: OCR index
